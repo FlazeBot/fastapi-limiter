@@ -1,3 +1,4 @@
+import hashlib
 from math import ceil
 from typing import Callable, Optional, Union
 
@@ -43,6 +44,8 @@ async def ws_default_callback(ws: WebSocket, pexpire: int):
         HTTP_429_TOO_MANY_REQUESTS, "Too Many Requests", headers={"Retry-After": str(expire)}
     )
 
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
 class FastAPILimiter:
     redis = None
@@ -70,18 +73,26 @@ end"""
 
     @classmethod
     async def init(
-        cls,
-        redis,
-        prefix: str = "fastapi-limiter",
-        identifier: Callable = default_identifier,
-        http_callback: Callable = http_default_callback,
-        ws_callback: Callable = ws_default_callback,
+            cls,
+            redis,
+            prefix: str = "fastapi-limiter",
+            identifier: Callable = default_identifier,
+            http_callback: Callable = http_default_callback,
+            ws_callback: Callable = ws_default_callback,
+            authorized_passwords: list[str] = None,
+            query_param_names: list[str] = None,
+            bearer_token_headers: list[str] = None,
+            api_key_headers: list[str] = None
     ) -> None:
         cls.redis = redis
         cls.prefix = prefix
         cls.identifier = identifier
         cls.http_callback = http_callback
         cls.ws_callback = ws_callback
+        cls.authorized_passwords = [hash_password(pw) for pw in (authorized_passwords or [])]
+        cls.query_param_names = query_param_names or []
+        cls.bearer_token_headers = bearer_token_headers or []
+        cls.api_key_headers = api_key_headers or []
         cls.lua_sha = await redis.script_load(cls.lua_script)
 
     @classmethod

@@ -1,4 +1,7 @@
+import secrets
 from typing import Annotated, Callable, Optional
+
+import hashlib
 
 import redis as pyredis
 from pydantic import Field
@@ -8,22 +11,27 @@ from starlette.websockets import WebSocket
 
 from fastapi_limiter import FastAPILimiter
 
+def hash_input(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
 
 class RateLimiter:
     def __init__(
-        self,
-        times: Annotated[int, Field(ge=0)] = 1,
-        milliseconds: Annotated[int, Field(ge=-1)] = 0,
-        seconds: Annotated[int, Field(ge=-1)] = 0,
-        minutes: Annotated[int, Field(ge=-1)] = 0,
-        hours: Annotated[int, Field(ge=-1)] = 0,
-        identifier: Optional[Callable] = None,
-        callback: Optional[Callable] = None,
+            self,
+            times: Annotated[int, Field(ge=0)] = 1,
+            milliseconds: Annotated[int, Field(ge=-1)] = 0,
+            seconds: Annotated[int, Field(ge=-1)] = 0,
+            minutes: Annotated[int, Field(ge=-1)] = 0,
+            hours: Annotated[int, Field(ge=-1)] = 0,
+            identifier: Optional[Callable] = None,
+            callback: Optional[Callable] = None,
+            enable_bypass: bool = False
     ):
         self.times = times
         self.milliseconds = milliseconds + 1000 * seconds + 60000 * minutes + 3600000 * hours
         self.identifier = identifier
         self.callback = callback
+        self.enable_bypass = enable_bypass
 
     async def _check(self, key):
         redis = FastAPILimiter.redis
@@ -33,6 +41,23 @@ class RateLimiter:
         return pexpire
 
     async def __call__(self, request: Request, response: Response):
+        if self.enable_bypass:
+            for param in FastAPILimiter.query_param_names:
+                raw_value = request.query_params.get(param, "")
+                hashed_value = hash_input(raw_value)
+                if secrets.compare_digest(hashed_value, FastAPILimiter.authorized_passwords):
+                    return
+            for header in FastAPILimiter.bearer_token_headers:
+                raw_bearer_token = request.headers.get(header + " ", "")
+                hashed_bearer_token = hash_input(raw_bearer_token)
+                if secrets.compare_digest(hashed_bearer_token, FastAPILimiter.authorized_passwords):
+                    return
+            for header in FastAPILimiter.api_key_headers:
+                raw_api_key = request.headers.get(header, "")
+                hashed_api_key = hash_input(raw_api_key)
+                if secrets.compare_digest(hashed_api_key, FastAPILimiter.authorized_passwords):
+                    return
+
         if not FastAPILimiter.redis:
             raise Exception("You must call FastAPILimiter.init in startup event of fastapi!")
         route_index = 0
