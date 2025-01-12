@@ -45,18 +45,21 @@ class RateLimiter:
             for param in FastAPILimiter.query_param_names:
                 raw_value = request.query_params.get(param, "")
                 hashed_value = hash_input(raw_value)
-                if secrets.compare_digest(hashed_value, FastAPILimiter.authorized_passwords):
-                    return
+                for password in FastAPILimiter.authorized_passwords:
+                    if secrets.compare_digest(hashed_value, password):
+                        return
             for header in FastAPILimiter.bearer_token_headers:
                 raw_bearer_token = request.headers.get(header + " ", "")
                 hashed_bearer_token = hash_input(raw_bearer_token)
-                if secrets.compare_digest(hashed_bearer_token, FastAPILimiter.authorized_passwords):
-                    return
+                for password in FastAPILimiter.authorized_passwords:
+                    if secrets.compare_digest(hashed_bearer_token, password):
+                        return
             for header in FastAPILimiter.api_key_headers:
                 raw_api_key = request.headers.get(header, "")
                 hashed_api_key = hash_input(raw_api_key)
-                if secrets.compare_digest(hashed_api_key, FastAPILimiter.authorized_passwords):
-                    return
+                for password in FastAPILimiter.authorized_passwords:
+                    if secrets.compare_digest(hashed_api_key, password):
+                        return
 
         if not FastAPILimiter.redis:
             raise Exception("You must call FastAPILimiter.init in startup event of fastapi!")
