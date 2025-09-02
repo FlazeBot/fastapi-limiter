@@ -9,6 +9,75 @@ from starlette.status import HTTP_429_TOO_MANY_REQUESTS
 from starlette.websockets import WebSocket
 
 
+_refund_script_sha = None
+_refund_script = """
+local key = KEYS[1]
+local current = tonumber(redis.call('get', key) or "0")
+if current > 0 then
+    redis.call("DECR", key)
+end
+return current
+"""
+
+async def mark_request_ignored(request: Request, response: Response) -> None:
+    """
+    Marque une requête comme devant être ignorée du rate limiting principal.
+    Rembourse automatiquement le crédit de rate limiting et applique les ConditionalRateLimiter.
+    
+    :param request: L'objet Request FastAPI/Starlette
+    :param response: L'objet Response FastAPI/Starlette
+    """
+    # 1. Rembourser le rate limiting principal
+    await refund_rate_limit_for_request(request)
+    
+    # 2. Appliquer les ConditionalRateLimiter s'il y en a
+    if hasattr(request.state, 'conditional_limiters'):
+        for limiter in request.state.conditional_limiters:
+            await limiter.apply_for_ignored_request(request, response)
+    
+    # 3. Marquer comme ignorée
+    setattr(response, '_rate_limit_ignored', True)
+
+
+async def refund_rate_limit_for_request(request: Request) -> None:
+    """
+    Rembourse automatiquement le rate limiting si la requête est marquée comme ignorée.
+    À appeler dans votre endpoint après avoir potentiellement marqué la requête.
+    """
+    global _refund_script_sha
+    
+    if not FastAPILimiter.redis:
+        return
+    
+    # Trouver tous les RateLimiter appliqués à cette route
+    route_index = 0
+    for i, route in enumerate(request.app.routes):
+        if route.path == request.scope["path"] and request.method in route.methods:
+            route_index = i
+            for j, dependency in enumerate(route.dependencies):
+                # Vérifier si c'est un RateLimiter (pas ConditionalRateLimiter)
+                dep_class = dependency.dependency.__class__.__name__
+                if dep_class == "RateLimiter":
+                    # Construire la clé Redis identique à celle du RateLimiter
+                    identifier = FastAPILimiter.identifier
+                    rate_key = await identifier(request)
+                    key = f"{FastAPILimiter.prefix}:{rate_key}:{route_index}:{j}"
+                    
+                    # Charger le script de remboursement si nécessaire
+                    if _refund_script_sha is None:
+                        _refund_script_sha = await FastAPILimiter.redis.script_load(_refund_script)
+                    
+                    # Exécuter le remboursement
+                    try:
+                        await FastAPILimiter.redis.evalsha(_refund_script_sha, 1, key)
+                    except:
+                        # Recharger le script si nécessaire et réessayer
+                        _refund_script_sha = await FastAPILimiter.redis.script_load(_refund_script)
+                        await FastAPILimiter.redis.evalsha(_refund_script_sha, 1, key)
+            break
+
+
+
 async def default_identifier(request: Union[Request, WebSocket]):
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:

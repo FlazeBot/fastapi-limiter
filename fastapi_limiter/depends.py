@@ -9,7 +9,8 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
 
-from fastapi_limiter import FastAPILimiter
+# Import moved to avoid circular dependency
+# FastAPILimiter will be imported locally where needed
 
 def hash_input(value):
     return hashlib.sha256(value.encode()).hexdigest()
@@ -34,6 +35,7 @@ class RateLimiter:
         self.enable_bypass = enable_bypass
 
     async def _check(self, key):
+        from fastapi_limiter import FastAPILimiter
         redis = FastAPILimiter.redis
         pexpire = await redis.evalsha(
             FastAPILimiter.lua_sha, 1, key, str(self.times), str(self.milliseconds)
@@ -41,6 +43,8 @@ class RateLimiter:
         return pexpire
 
     async def __call__(self, request: Request, response: Response):
+        from fastapi_limiter import FastAPILimiter
+        
         if self.enable_bypass:
             for param in FastAPILimiter.query_param_names:
                 raw_value = request.query_params.get(param, "")
@@ -89,8 +93,64 @@ class RateLimiter:
             return await callback(request, response, pexpire)
 
 
+class ConditionalRateLimiter(RateLimiter):
+    """
+    Rate limiter qui s'applique seulement aux requêtes ignorées.
+    Utilisé comme rate limiting de secours pour éviter le spam.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, request: Request, response: Response):
+        # Ne pas appliquer maintenant - sera appliqué seulement pour les requêtes ignorées
+        # Stocker les infos pour une application conditionnelle plus tard
+        if not hasattr(request.state, 'conditional_limiters'):
+            request.state.conditional_limiters = []
+        request.state.conditional_limiters.append(self)
+
+    async def apply_for_ignored_request(self, request: Request, response: Response):
+        """
+        Applique le rate limiting conditionnel pour une requête marquée comme ignorée.
+        """
+        from fastapi_limiter import FastAPILimiter
+        
+        if not FastAPILimiter.redis:
+            raise Exception("You must call FastAPILimiter.init in startup event of fastapi!")
+        
+        # Trouver l'index de cette route et de cette dépendance
+        route_index = 0
+        dep_index = 0
+        for i, route in enumerate(request.app.routes):
+            if route.path == request.scope["path"] and request.method in route.methods:
+                route_index = i
+                for j, dependency in enumerate(route.dependencies):
+                    if self is dependency.dependency:
+                        dep_index = j
+                        break
+                break
+
+        identifier = self.identifier or FastAPILimiter.identifier
+        callback = self.callback or FastAPILimiter.http_callback
+        rate_key = await identifier(request)
+        key = f"{FastAPILimiter.prefix}:conditional:{rate_key}:{route_index}:{dep_index}"
+        
+        try:
+            pexpire = await self._check(key)
+        except pyredis.exceptions.NoScriptError:
+            FastAPILimiter.lua_sha = await FastAPILimiter.redis.script_load(
+                FastAPILimiter.lua_script
+            )
+            pexpire = await self._check(key)
+        
+        if pexpire != 0:
+            return await callback(request, response, pexpire)
+
+
 class WebSocketRateLimiter(RateLimiter):
     async def __call__(self, ws: WebSocket, context_key=""):
+        from fastapi_limiter import FastAPILimiter
+        
         if not FastAPILimiter.redis:
             raise Exception("You must call FastAPILimiter.init in startup event of fastapi!")
         identifier = self.identifier or FastAPILimiter.identifier
